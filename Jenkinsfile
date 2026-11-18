@@ -4,8 +4,8 @@ pipeline {
   environment {
     AWS_REGION   = 'us-east-1'            // change to your region
     ECR_REPO     = 'scenario30-app'
-    ECS_CLUSTER  = 'scenario30-cluster'
-    ECS_SERVICE  = 'scenario30-service'
+    ECS_CLUSTER  = 'scenario30-cluster-haris'
+    ECS_SERVICE  = 'sscenario30-task-haris-service-ywnur539'
     TASK_FAMILY  = 'scenario30-task'
     IMAGE_TAG    = "${env.BUILD_NUMBER}"
   }
