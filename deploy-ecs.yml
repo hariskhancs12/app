@@ -1,0 +1,83 @@
+name: Build, Push to ECR & Deploy to ECS
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+# OIDC: GitHub issues a short-lived token, AWS swaps it for temporary credentials
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: me-central-1
+  ECR_REPOSITORY: scenario32-app
+  ECS_CLUSTER: scenario32-cluster
+  ECS_SERVICE: scenario32-service
+  TASK_FAMILY: scenario32-task
+  CONTAINER_NAME: scenario32-app
+  LOG_GROUP: /ecs/scenario32
+
+jobs:
+  deploy:
+    name: Build -> ECR -> ECS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag and push image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          # Dockerfile replaces __BUILD__ in index.html with this value
+          docker build --build-arg BUILD_NUMBER=GHA-${{ github.run_number }}-${IMAGE_TAG::7} -t $IMAGE_URI .
+          docker push $IMAGE_URI
+          echo "image=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      # Re-use the same taskdef.json as the Jenkins pipeline:
+      # fill the __PLACEHOLDERS__ and override the scenario30 names with scenario32 ones
+      - name: Prepare task definition
+        id: prep
+        env:
+          IMAGE_URI: ${{ steps.build-image.outputs.image }}
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          sed -e "s|__IMAGE_URI__|$IMAGE_URI|" \
+              -e "s|__ACCOUNT_ID__|$ACCOUNT_ID|" \
+              -e "s|__REGION__|$AWS_REGION|" taskdef.json \
+          | jq --arg fam "$TASK_FAMILY" --arg c "$CONTAINER_NAME" --arg lg "$LOG_GROUP" '
+              .family = $fam
+              | .containerDefinitions[0].name = $c
+              | .containerDefinitions[0].logConfiguration.options["awslogs-group"] = $lg
+            ' > taskdef-rendered.json
+          cat taskdef-rendered.json
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: taskdef-rendered.json
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Summary
+        run: |
+          echo "### Deployed :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: \`${{ steps.build-image.outputs.image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Service: \`${{ env.ECS_CLUSTER }}/${{ env.ECS_SERVICE }}\`" >> $GITHUB_STEP_SUMMARY
